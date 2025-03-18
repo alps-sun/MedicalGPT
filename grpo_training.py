@@ -35,7 +35,8 @@ class ScriptArguments:
         default="xiaodongguaAIGC/X-R1-750",
         metadata={"help": "The name of the dataset to use (via the datasets library)."}
     )
-    train_samples: Optional[int] = field(default=-1, metadata={"help": "Number of samples to train on, -1 for all"})
+    train_samples: Optional[int] = field(default=-1,
+                                         metadata={"help": "Number of samples to train on, -1 for all"})  # -1表示全部
     subset_name: Optional[str] = field(default="default",
                                        metadata={"help": "Subset name, e.g., 'default', 'main'. default is 'default'"})
     dataset_splits: Optional[str] = field(default="train", metadata={"help": "Split name"})
@@ -52,6 +53,7 @@ def normalize_text(text):
     return text
 
 
+# 函数extract_answer用于从给定的文本中提取出答案部分，即<answer>和</answer>之间的内容。
 def extract_answer(text):
     """Extract content between <answer> tags."""
     if text is None:
@@ -62,7 +64,24 @@ def extract_answer(text):
     return text.strip()
 
 
+# 函数accuracy_reward用于计算准确率奖励，它接受两个参数：completions和solution。
 def accuracy_reward(completions, solution, **kwargs):
+    """
+    计算完成与真实答案之间准确率的奖励函数。
+
+    Args:
+        completions (list of dict): 包含多个完成情况的列表，每个完成情况都是一个字典，
+            字典中包含一个键 'content'，其值是一个字符串，表示该完成情况的答案。
+        solution (list of str): 包含真实答案的列表，列表中的每个元素都是一个字符串，
+            表示对应完成情况的真实答案。
+        **kwargs: 任意数量的关键字参数，这些参数会被忽略。
+
+    Returns:
+        list of float: 包含奖励的列表，列表中的每个元素都是一个浮点数，
+            表示对应完成情况的奖励。奖励为1表示完成情况与真实答案相同，为0表示不同。
+            如果真实答案无法解析，则奖励为1以跳过该示例。
+
+    """
     """Reward function that checks if the completion is the same as the ground truth."""
     contents = [completion[0]["content"] for completion in completions]
     rewards = []
@@ -158,8 +177,8 @@ def find_all_linear_names(peft_model, int4=False, int8=False):
 def grpo_train(
         model_args: ModelConfig, script_args: ScriptArguments, training_args: GRPOConfig
 ):
-    # Add distributed training initialization
-    is_main_process = training_args.local_rank in [-1, 0]
+    # Add distributed training initialization 添加分布式训练初始化
+    is_main_process = training_args.local_rank in [-1, 0]  # 判断当前进程是否为主进程, -1表示没有分布式训练, 0表示主进程
 
     # Only log on main process
     if is_main_process:
@@ -178,19 +197,22 @@ def grpo_train(
             if script_args.tokenizer_name_or_path
             else model_args.model_name_or_path
         ),
-        revision=model_args.model_revision,
+        revision=model_args.model_revision,  # 指定模型版本, 默认为None,
         trust_remote_code=model_args.trust_remote_code,
     )
     if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
+        tokenizer.pad_token = tokenizer.eos_token  # 设置pad_token为eos_token, eos_token是tokenizer的结束符号, 结束符号是tokenizer的结束符号, 用于填充序列长度不一致的情况,
 
     # Load datasets
-    dataset = load_dataset(script_args.dataset_name, script_args.subset_name, split=script_args.dataset_splits)
+    dataset = load_dataset(script_args.dataset_name, script_args.subset_name,
+                           split=script_args.dataset_splits)  # 加载数据集, split是数据集的子集, 默认为None, 表示全部
     if script_args.train_samples > 0:
-        dataset = dataset.shuffle(seed=42).select(range(script_args.train_samples))
+        dataset = dataset.shuffle(seed=42).select(
+            range(script_args.train_samples))  # 随机打乱数据集, 并选取前script_args.train_samples个样本
 
     # Prepare dataset
-    with training_args.main_process_first(desc="Dataset preparation"):
+    with training_args.main_process_first(
+            desc="Dataset preparation"):  # 使用main_process_first装饰器, 确保在主进程中执行 dataset.map()函数, 并指定num_proc为script_args.preprocessing_num_workers, 并指定desc为"Processing dataset", 仅在主进程中执行, 仅在主进程中执行
         dataset = dataset.map(
             lambda x: {
                 'prompt': [
@@ -199,7 +221,7 @@ def grpo_train(
                 ],
                 'answer': x['solution']
             },
-            num_proc=script_args.preprocessing_num_workers,
+            num_proc=script_args.preprocessing_num_workers,  # 预处理工作线程数, 默认为None, 表示使用默认的线程数
             desc="Processing dataset" if is_main_process else None,
         )
 
@@ -208,7 +230,7 @@ def grpo_train(
     train_dataset = train_test_split["train"]
     test_dataset = train_test_split["test"]
 
-    if is_main_process:
+    if is_main_process:  # 仅在主进程中执行
         logger.info("*** Initializing model kwargs ***")
 
     # Model initialization
@@ -216,27 +238,27 @@ def grpo_train(
         model_args.torch_dtype if model_args.torch_dtype in ["auto", None] else getattr(torch, model_args.torch_dtype)
     )
 
-    # Set up distributed training config
+    # Set up distributed training config 设置分布式训练配置
     world_size = int(os.environ.get("WORLD_SIZE", "1"))
-    ddp = world_size != 1
-    if ddp:
-        training_args.device_map = {"": int(os.environ.get("LOCAL_RANK", "0"))}
+    ddp = world_size != 1  # 判断是否使用分布式训练, 如果world_size不等于1, 则为分布式训练, 否则为单机训练
+    if ddp:  # 如果是分布式训练, 则设置训练参数
+        training_args.device_map = {"": int(os.environ.get("LOCAL_RANK", "0"))}  # 0 表示当前进程的设备索引, 即当前进程所在的设备
         training_args.gradient_accumulation_steps = training_args.gradient_accumulation_steps // world_size
 
     model_kwargs = dict(
-        revision=model_args.model_revision,
-        trust_remote_code=model_args.trust_remote_code,
-        attn_implementation=model_args.attn_implementation,
-        torch_dtype=torch_dtype,
-        use_cache=False if training_args.gradient_checkpointing else True,
-        device_map=training_args.device_map if ddp else "auto",
+        revision=model_args.model_revision,  # 指定模型版本, 默认为None
+        trust_remote_code=model_args.trust_remote_code,  # 信任远程代码, 默认为False
+        attn_implementation=model_args.attn_implementation,  # 指定注意力实现方式, 默认为None, 表示使用默认的实现方式
+        torch_dtype=torch_dtype,  # 指定torch的数据类型, 默认为None, 表示使用默认的数据类型
+        use_cache=False if training_args.gradient_checkpointing else True,  # 是否使用缓存, 默认为True, 表示使用缓存, 否则不使用缓存
+        device_map=training_args.device_map if ddp else "auto",  # 指定训练设备, 默认为"auto", 表示使用默认的设备
     )
     training_args.model_init_kwargs = model_kwargs
 
     # Configure LoRA if enabled
     peft_config = None
     if model_args.use_peft:
-        if is_main_process:
+        if is_main_process:  # 仅在主进程中执行
             logger.info("Fine-tuning method: LoRA(PEFT)")
         target_modules = model_args.lora_target_modules if model_args.lora_target_modules else None
         if is_main_process:
@@ -252,7 +274,7 @@ def grpo_train(
     else:
         logger.info("Fine-tuning method: Full parameters training")
 
-    # Initialize GRPO trainer with distributed training support
+    # Initialize GRPO trainer with distributed training support 通过分布式培训支持初始化GRPO训练
     trainer = GRPOTrainer(
         model=model_args.model_name_or_path,
         processing_class=tokenizer,
@@ -318,7 +340,7 @@ def grpo_train(
 
 
 def main():
-    parser = TrlParser((ModelConfig, ScriptArguments, GRPOConfig))
+    parser = TrlParser((ModelConfig, ScriptArguments, GRPOConfig))  # 创建解析器, 并解析命令行参数, 返回模型配置, 分别对应于模型参数, 脚本参数和训练参数
     model_args, script_args, training_args = parser.parse_args_and_config()
 
     # Run the main training loop
